@@ -19,6 +19,7 @@ import {
 import {
   archivePnpmStore,
   extractPnpmStoreArchives,
+  mergePnpmStore,
   removePnpmProjectRegistrations,
 } from '../src/seed-store.ts'
 import {
@@ -32,6 +33,11 @@ import {
 import { resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
+const FETCH_TIMEOUT_MS = process.env.DSH_DESKTOP_FETCH_TIMEOUT_MS
+if (FETCH_TIMEOUT_MS !== undefined && (!/^[1-9]\d*$/u.test(FETCH_TIMEOUT_MS)
+  || !Number.isSafeInteger(Number(FETCH_TIMEOUT_MS)))) {
+  throw new Error('desktop seed: DSH_DESKTOP_FETCH_TIMEOUT_MS must be a positive safe integer')
+}
 const BUILD_PATHS = resolveDesktopTargetBuildPaths()
 const SEED_OUTPUT_ROOT = BUILD_PATHS.seed
 const SEED_ROOT = mkdtempSync(join(tmpdir(), 'dsh-desktop-seed-'))
@@ -78,6 +84,7 @@ function runPnpm(args: readonly string[]): Promise<void> {
       `--config.store-dir=${STORE_ROOT}`,
       '--config.enable-global-virtual-store=false',
       `--config.userconfig=${userConfig}`,
+      ...(FETCH_TIMEOUT_MS === undefined ? [] : [`--config.fetch-timeout=${FETCH_TIMEOUT_MS}`]),
       command,
       ...commandArgs,
     ], {
@@ -145,11 +152,15 @@ async function main(): Promise<void> {
   rmSync(PNPM_BUILD_STATE, { recursive: true, force: true })
   mkdirSync(STORE_ROOT, { recursive: true })
   try {
+    const prefetchedStore = process.env.DSH_DESKTOP_PREFETCHED_STORE
+    if (prefetchedStore !== undefined) mergePnpmStore(resolve(prefetchedStore), STORE_ROOT)
     const release = desktopRelease()
     copyFileSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGE_SET_FILE), join(SEED_ROOT, DESKTOP_PACKAGE_SET_FILE))
     cpSync(join(PACKAGE_SET_ROOT, DESKTOP_PACKAGES_DIR), join(SEED_ROOT, DESKTOP_PACKAGES_DIR), { recursive: true })
-    createSeedMetadata(SEED_ROOT, release)
-    await runPnpm(['install', '--lockfile-only'])
+    createSeedMetadata(SEED_ROOT, release, JSON.parse(readFileSync(join(APP_ROOT, 'preinstalled-plugins.json'), 'utf8')))
+    const prefetchedLockfile = process.env.DSH_DESKTOP_PREFETCHED_LOCKFILE
+    if (prefetchedLockfile === undefined) await runPnpm(['install', '--lockfile-only'])
+    else copyFileSync(resolve(prefetchedLockfile), join(SEED_ROOT, 'pnpm-lock.yaml'))
     verifyDesktopCoreLockfile(
       readFileSync(join(SEED_ROOT, 'pnpm-lock.yaml'), 'utf8'),
       readDesktopCorePackageSet(SEED_ROOT, release.version),

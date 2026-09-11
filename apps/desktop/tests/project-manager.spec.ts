@@ -77,9 +77,9 @@ function writeCorePackageSet(seed: string, version: string): void {
   })}\n`)
 }
 
-function createTestSeedMetadata(seed: string, desktopRelease: DesktopRelease): void {
+function createTestSeedMetadata(seed: string, desktopRelease: DesktopRelease, plugins: unknown = {}): void {
   writeCorePackageSet(seed, desktopRelease.version)
-  createSeedMetadata(seed, desktopRelease)
+  createSeedMetadata(seed, desktopRelease, plugins)
 }
 
 function writeFakePnpm(root: string): string {
@@ -101,10 +101,17 @@ const packageVersion = spec => {
 }
 
 if (command === 'add') {
-  const spec = args[args.indexOf('add') + 1]
-  manifest.dependencies[packageName(spec)] = packageVersion(spec)
+  for (const spec of args.slice(args.indexOf('add') + 1)) {
+    if (spec.startsWith('--')) break
+    manifest.dependencies[packageName(spec)] = packageVersion(spec)
+  }
 }
-if (command === 'remove') delete manifest.dependencies[args[args.indexOf('remove') + 1]]
+if (command === 'remove') {
+  for (const name of args.slice(args.indexOf('remove') + 1)) {
+    if (name.startsWith('--')) break
+    delete manifest.dependencies[name]
+  }
+}
 writeFileSync(manifestPath, JSON.stringify(manifest))
 rmSync(join(project, 'node_modules'), { recursive: true, force: true })
 for (const [name, version] of Object.entries(manifest.dependencies)) {
@@ -113,7 +120,7 @@ for (const [name, version] of Object.entries(manifest.dependencies)) {
   const core = name === '@deepseek-ai/dsh' || name === '@deepseek-ai/dsh-desktop-host'
   const plugin = !core
   const installedVersion = plugin
-    ? version
+    ? (version.startsWith('https:') ? '1.2.3' : version)
     : JSON.parse(readFileSync(join(project, 'desktop-release.json'), 'utf8')).version
   writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
     name, version: installedVersion,
@@ -173,6 +180,35 @@ afterEach(async () => {
 })
 
 describe('desktop package policy', () => {
+  it.each([
+    null, [], 'plugin', { plugin: 12 }, { plugin: 'latest' }, { plugin: '^1.2.3' },
+    { plugin: 'file:../plugin' }, { plugin: 'http://example.test/plugin.tgz' },
+    { plugin: 'https://example.test/plugin.tgz?token=secret' },
+    { '@deepseek-ai/dsh': '9.0.0' }, { '@deepseek-ai/dsh-base': '9.0.0' },
+  ])('rejects invalid or core-replacing preinstalled plugin configuration: %j', (plugins) => {
+    const seed = join(temporaryRoot(), 'seed')
+    expect(() => { createTestSeedMetadata(seed, release(), plugins) }).toThrow()
+  })
+
+  it('preinstalls the published Aiko market and Office plugins', () => {
+    const seed = join(temporaryRoot(), 'seed')
+    const plugins: unknown = JSON.parse(readFileSync(new URL('../preinstalled-plugins.json', import.meta.url), 'utf8'))
+    createTestSeedMetadata(seed, release(), plugins)
+    const manifest = JSON.parse(readFileSync(join(seed, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+      dsh: { profile: { bundles: string[] } }
+    }
+    expect(manifest.dsh.profile.bundles).toEqual([
+      '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dshmarket', 'aiko-dsh-office',
+    ])
+    expect(manifest.dependencies.dshmarket).toMatch(
+      /^https:\/\/github\.com\/aiko-dsh-plugins\/dsh-market\/releases\/download\/v[^/]+\/dshmarket-[^/]+\.tgz$/u,
+    )
+    expect(manifest.dependencies['aiko-dsh-office']).toMatch(
+      /^https:\/\/github\.com\/aiko-dsh-plugins\/dsh-office\/releases\/download\/v[^/]+\/aiko-dsh-office-[^/]+\.tgz$/u,
+    )
+  })
+
   it('accepts registry package specs but rejects alternate sources and flags', () => {
     expect(packageNameFromSpec('@scope/plugin@1.2.3')).toBe('@scope/plugin')
     expect(packageNameFromSpec('plugin@next')).toBe('plugin')
@@ -193,6 +229,74 @@ describe('desktop package policy', () => {
 })
 
 describe('desktop project transactions', () => {
+  it.each([false, true])('preserves default-plugin updates and removals across releases with business plugins: %s', async (withBusiness) => {
+    const root = temporaryRoot()
+    const source = 'https://github.com/org/market/releases/download/v1.2.3/market.tgz'
+    const defaults = { market: source, optional: '1.0.0' }
+    const prepare = (version: string): string => {
+      const seed = join(root, version)
+      createTestSeedMetadata(seed, release(version), defaults)
+      writeFileSync(join(seed, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+      archiveStore(seed)
+      writeIntegrity(seed)
+      return seed
+    }
+    const paths = resolveDesktopPaths(join(root, '.dsh'))
+    const manager = new DesktopProjectManager(paths, { node: process.execPath, pnpm: writeFakePnpm(root) })
+    await manager.applyRelease(prepare('1.0.0'), '1.0.0', hooks())
+    expect(manager.listPlugins()).toEqual([
+      { name: 'market', version: '1.2.3', spec: `market@${source}` },
+      { name: 'optional', version: '1.0.0' },
+    ])
+    const updated = 'https://github.com/org/market/releases/download/v1.2.4/market.tgz'
+    await manager.mutate({ type: 'plugins-add', specs: [`market@${updated}`, ...(withBusiness ? ['business@2.0.0'] : [])] }, hooks())
+    await manager.applyRelease(prepare('2.0.0'), '2.0.0', hooks())
+    expect(manager.listPlugins()[0]?.spec).toBe(`market@${updated}`)
+    await manager.mutate({ type: 'plugin-remove', name: 'market' }, hooks())
+    await manager.mutate({ type: 'plugin-remove', name: 'optional' }, hooks())
+    expect(await manager.applyRelease(join(root, '2.0.0'), '2.0.0', hooks())).toBe(false)
+    await manager.applyRelease(prepare('3.0.0'), '3.0.0', hooks())
+    expect(manager.listPlugins()).toEqual(withBusiness ? [{ name: 'business', version: '2.0.0' }] : [])
+    const manifest = JSON.parse(readFileSync(join(paths.profile, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+    expect(manifest.dependencies.market).toBeUndefined()
+    expect(manifest.dependencies.optional).toBeUndefined()
+    expect(existsSync(join(paths.profile, 'node_modules', 'market'))).toBe(false)
+  })
+
+  it('activates catalog dependencies together and keeps artifact sources across release upgrades', async () => {
+    const root = temporaryRoot()
+    const seed = join(root, 'seed')
+    createTestSeedMetadata(seed, release())
+    writeFileSync(join(seed, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+    archiveStore(seed)
+    writeIntegrity(seed)
+    const paths = resolveDesktopPaths(join(root, '.dsh'))
+    const manager = new DesktopProjectManager(paths, { node: process.execPath, pnpm: writeFakePnpm(root) })
+    await manager.applyRelease(seed, '1.0.0', hooks())
+    const source = 'https://github.com/org/kernel/releases/download/v1.2.3/kernel.tgz'
+    await manager.mutate({ type: 'plugins-add', specs: [`ontology@${source}`, 'bid@1.0.0'] }, hooks())
+    expect(manager.listPlugins()).toEqual([
+      { name: 'ontology', version: '1.2.3', spec: `ontology@${source}` },
+      { name: 'bid', version: '1.0.0' },
+    ])
+    const next = join(root, 'next')
+    createTestSeedMetadata(next, release('2.0.0'))
+    writeFileSync(join(next, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+    archiveStore(next)
+    writeIntegrity(next)
+    await manager.applyRelease(next, '2.0.0', hooks())
+    expect(manager.listPlugins()[0]).toEqual({ name: 'ontology', version: '1.2.3', spec: `ontology@${source}` })
+    const bidManifest = join(paths.profile, 'node_modules', 'bid', 'package.json')
+    const bid = JSON.parse(readFileSync(bidManifest, 'utf8')) as object
+    writeFileSync(bidManifest, JSON.stringify({ ...bid, peerDependencies: { ontology: '^1.2.3' } }))
+    await expect(manager.mutate({ type: 'plugin-remove', name: 'ontology' }, hooks())).rejects.toThrow('required by bid')
+    await expect(manager.mutate({ type: 'plugins-add', specs: ['@deepseek-ai/dsh@99'] }, hooks())).rejects.toThrow('managed by the desktop release')
+    await expect(manager.mutate({ type: 'plugins-add', specs: ['other@1', 'last@1'] }, hooks({
+      healthCheck: async () => { throw new Error('dependency cannot boot') },
+    }))).rejects.toThrow('dependency cannot boot')
+    expect(manager.listPlugins().map(plugin => plugin.name)).toEqual(['ontology', 'bid'])
+  })
+
   it('installs the offline seed and reconciles a mismatched private Host', async () => {
     const root = temporaryRoot()
     const seed = join(root, 'seed')

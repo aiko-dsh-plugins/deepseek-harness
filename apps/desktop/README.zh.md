@@ -10,7 +10,7 @@
 |---|---|---|
 | 发布身份 | 桌面壳 API、Web 客户端、后端与插件依赖图作为一个组合完成验证；独立版本会产生未经验证的组合，并让更新可用性含糊不清。 | Electron 与 `@deepseek-ai/dsh` 始终使用同一精确版本。即使桌面壳代码不变，升级 dsh 也必须发布新 Desktop 版本。 |
 | 运行时 | Electron 的 Node.js 带有 Electron 补丁、fuse、ABI 与生命周期约束，而系统运行时和用户包管理器状态不可控。 | dsh 通过内置的上游 Node.js 运行，所有包操作都使用内置 pnpm。Electron 的 Node.js、系统 Node.js、系统 pnpm 与用户的包管理器配置都不进入执行路径。 |
-| 包来源 | 必须能在发布到 npm 之前从同一次源码构建打包精确的 dsh，并支持离线安装；插件则需要保留为用户选择的普通 npm 包。 | 已签名应用携带本地打包的第一方 dsh 包与离线 seed store。桌面插件仍是从固定 Desktop registry 解析的普通 npm 依赖。 |
+| 包来源 | 必须能在发布到 npm 之前从同一次源码构建打包精确的 dsh，并支持离线安装；插件需要独立的发布来源。 | 已签名应用携带本地打包的第一方 dsh 包与离线 seed store。桌面插件使用固定 npm registry 或明确指定包名的 HTTPS 发布 tarball。 |
 | Seed 传输 | Apple 公证会检查归档内的代码；把 pnpm store 的每个文件分别放入应用，还会让应用签名记录数万个缓存条目，而单个压缩归档会放大小幅包变更。 | macOS 打包先签署每个 Mach-O CAS 对象、重写其 pnpm 哈希并再次证明离线安装，再把 store 文件分配到 16 个确定性的未压缩 tar 分片。外层安装包负责压缩，差分更新可以复用未变化的分片。 |
 | 状态归属 | 共享可执行依赖图会让 CLI 与 Desktop 相互改变 dsh、Cordis、插件或原生模块版本，而两个桌面进程还可能争用同一个 profile。 | Electron 在访问任何 profile 前获取进程生命周期单实例锁，并独占 `$DSH_HOME/profiles/desktop` 及其包管理器状态。CLI 与 Desktop 共享 `$DSH_HOME` 下受支持的产品数据，但绝不共享可执行包、插件激活、锁文件或 `node_modules`。 |
 | 通信 | 监听 Web 服务会引入端口归属、认证、CORS 与暴露风险；Electron 与上游 Node.js 之间也需要明确的跨进程协议。 | 应用不打开 Web 端口。`dsh-app://` 承载 Web 资源和 Fetch 流量；分帧字节管道以背压传输有界请求与响应分块，Node IPC 只承载子进程生命周期控制。 |
@@ -23,11 +23,17 @@
 
 Electron 拥有保留 profile `$DSH_HOME/profiles/desktop`。其 manifest 通过 `dsh.profile.bundles` 列出内置与已安装插件 bundle，`node_modules` 则同时包含精确版本的 `@deepseek-ai/dsh`、与之匹配的私有 `@deepseek-ai/dsh-desktop-host` 和所有桌面插件。把 Electron 专用进程入口与 overlay 放入私有应用包，可以避免 Desktop 实现成为公共 CLI 包的一部分。CLI 不能启动或修改该 profile。Electron 始终调用自身内置的 Node.js 与 pnpm，并把 store 固定在 `$DSH_HOME/desktop/pnpm/store`；它绝不使用系统 pnpm 或调用方的 npm/pnpm 配置。
 
-dsh 主渲染进程只获得桌面协议标记。独立插件窗口获得结构化的列出、安装、移除、更新和更新检查操作；两个渲染进程都拿不到文件系统、原始 Electron IPC、shell 或任意 pnpm 参数。
+dsh 主渲染进程获得桌面协议标记及带版本的 `dshDesktop.market` 桥，其提供 `list()` 和 `request(proposal)`。请求可安装有序的 `specs` 列表或移除一个指定插件；修改前，原生对话框会展示准确的包名和来源。只有应用主框架能提交请求，并发请求会被拒绝，取消操作不改变包状态。独立插件窗口保留结构化管理操作。两个渲染进程都拿不到文件系统、原始 Electron IPC、shell 或任意 pnpm 参数。
+
+市场安装接受 registry 包名及 `name@https://host/path/package.tgz`。本地路径、凭据、查询参数、片段、重复包名及替换发布版本拥有的包均被拒绝。依赖批次按照声明顺序共同激活，更新已安装依赖时保留其位置。卸载会检查其他插件的 dependencies 和 peerDependencies 声明。远程来源保留在 manifest 与锁文件中，并在发布校准时复用。[市场集成决策](../../.agents/notes/implemented/architecture/2026-09-10-desktop-market-proposals.zh.md)说明了归属取舍。
 
 Electron 根据应用 locale 选择类型化的中英文字典，并以英文作为 fallback。菜单、原生对话框与插件管理渲染进程使用同一 locale 数据；仓库的 Client UI i18n gate 会检查这些桌面源文件。
 
 ### Seed 安装
+
+[预装插件表](preinstalled-plugins.json)指定新 Desktop profile 的可选 bundle。Seed 准备过程下载其精确发布来源，并将它们纳入离线锁文件与 store；此发行配置预装 Aiko 市场和 Aiko Office。Office 自带 Windows x64、macOS arm64 和 macOS x64 的原生 Python 与文档处理库。这些插件仍可通过原生插件管理器卸载。重启与发布校准保留活跃 profile 的插件版本、来源和卸载结果，不会重新安装已卸载的默认插件。应用升级不会向已有 profile 追加新的默认插件。
+
+`DSH_DESKTOP_FETCH_TIMEOUT_MS` 将 pnpm 下载超时设置为正整数毫秒值；未设置时保留 pnpm 默认值。Seed 准备过程可以复用 `DSH_DESKTOP_PREFETCHED_STORE` 指定的已下载 pnpm store，以及 `DSH_DESKTOP_PREFETCHED_LOCKFILE` 指定的已审查锁文件。核心包验证、冻结锁文件安装、内容完整性检查和最终离线安装仍会执行。这些输入用于配置构建，不会复制到用户设置中。
 
 安装包内的 seed 是安装工具包，不是可以直接运行的 `node_modules` 目录。打包过程会生成锁文件，在禁用生命周期脚本的情况下在线物化生产依赖图，删除 `node_modules` 以及所有临时 pnpm cache、config 和 state 目录，然后只使用最终 store 完成一次完整离线安装，并验证私有 Desktop Host 的入口与 overlay 均存在。macOS 构建随后从 pnpm 内容寻址 store staging 每个 Mach-O 对象，最多并发四个 Developer ID 签名进程，并且只在所有签名成功后才更新受影响的 SHA-512 索引记录。再一次离线安装会在分片前证明重写后的 store；准备过程随后解包最终归档，并验证每个内嵌签名。签名 seed 保留发布身份、本地第一方 tarball 及其描述文件、项目元数据、锁文件、完整性清单，以及在用户机器上重复该安装所需的 pnpm store 内容。
 
@@ -43,11 +49,11 @@ Electron 根据应用 locale 选择类型化的中英文字典，并以英文作
 1. 恢复中断的激活事务日志，验证完整 seed 清单与本地包集，并要求 seed 版本等于 Electron 应用版本。
 2. 如果活跃 profile 已包含该发布及匹配的 dsh 与 Desktop Host 版本，则验证其中的本地包集并直接复用，不重新安装。
 3. 否则验证每个归档条目，把全部 store 分片解包到 Desktop 拥有的临时 staging 目录，将包文件与 SQLite 包索引记录合并进私有 store，再创建 staging profile，并通过内置 Node.js 与 pnpm 执行 `pnpm install --offline --frozen-lockfile --trust-lockfile`。Seed 记录替换匹配的索引键，插件专属记录继续保留。
-4. Electron 升级时，从旧活跃 profile 读取每个插件的名称和精确版本，再通过现有 Desktop pnpm 状态以 `--offline` 把这些版本加入 staging。首次安装不执行插件恢复。
+4. Electron 升级时，从旧活跃 profile 读取每个插件的名称、精确版本和远程制品来源，移除该 profile 中不存在的 seed 默认插件，再通过现有 Desktop pnpm 状态以 `--offline` 把其插件恢复到 staging。首次安装保留 seed 默认插件。
 5. 停止活跃后端，启动并停止完整的 staging 后端执行健康检查，再在激活前重新启动活跃后端。这种串行方式避免两个桌面后端共享 `$DSH_HOME`；安装错误或插件不兼容会删除 staging，并保持活跃 profile 不变。
 6. 在每次目录移动前先持久化下一个激活阶段，把活跃 profile 移到 `$DSH_HOME/desktop/rollback/profile`，再把 staging 移到 `$DSH_HOME/profiles/desktop`。恢复过程同时检查日志与真实的 profile、rollback 和 staging 目录，因此在任一个写入与移动间隙中断后仍会恢复或保留一个完整 profile。
 
-GUI 插件修改会在把 registry 包安装到共享 Desktop pnpm store 后，使用相同的 staging、健康检查、激活与 rollback 路径。
+GUI 插件修改会在把发布包安装到共享 Desktop pnpm store 后，使用相同的 staging、健康检查、激活与 rollback 路径。
 
 进程生命周期 Electron 锁是桌面端的主要 owner。事务锁用于纵深防御：准备本地状态时记录 Electron，在 pnpm worker 仍可能写入时记录该 worker，worker 退出后再把 owner 交还 Electron。后续进程不会把仍然存活的孤儿 worker 误判为陈旧事务。
 

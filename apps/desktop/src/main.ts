@@ -19,6 +19,7 @@ import { DESKTOP_IPC, type DesktopUpdateState } from './ipc.ts'
 import { formatDesktopMessage, resolveDesktopLocale } from './locale.ts'
 import { claimDesktopSingleInstance } from './single-instance.ts'
 import { DesktopUpdateCoordinator } from './update-coordinator.ts'
+import { desktopMarketRequestDetail, parseDesktopMarketRequest } from './market-request.ts'
 
 const SCHEME = 'dsh-app'
 let focusPrimaryWindow = (): void => {}
@@ -260,6 +261,42 @@ async function main(): Promise<void> {
       throw new Error('dsh desktop: plugin name and version must be strings')
     }
     return mutate(event, { type: 'plugin-update', name, version })
+  })
+  const assertMarketSender = (event: IpcMainInvokeEvent): void => {
+    assertDesktopSender(event, ['app'])
+    if (mainWindow === undefined || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame) {
+      throw new Error('dsh desktop: market requests require the application main frame')
+    }
+    if (development !== undefined) throw new Error('dsh desktop: market requires an installed desktop profile')
+  }
+  ipcMain.handle(DESKTOP_IPC.marketList, (event) => {
+    assertMarketSender(event)
+    return manager.listPlugins()
+  })
+  let marketRequestPending = false
+  ipcMain.handle(DESKTOP_IPC.marketRequest, async (event, value: unknown) => {
+    assertMarketSender(event)
+    const request = parseDesktopMarketRequest(value)
+    if (marketRequestPending) throw new Error('dsh desktop: another market request is pending')
+    marketRequestPending = true
+    try {
+      const confirmation = await dialog.showMessageBox({
+        type: 'question',
+        title: messages.marketConfirmTitle,
+        message: request.type === 'plugins-add' ? messages.marketInstall : messages.marketRemove,
+        detail: desktopMarketRequestDetail(request),
+        buttons: [request.type === 'plugins-add' ? messages.install : messages.remove, messages.cancel],
+        defaultId: 1,
+        cancelId: 1,
+      })
+      if (confirmation.response !== 0) return { applied: false }
+      await manager.mutate(request, hooks)
+      if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.reload()
+      return { applied: true }
+    } finally {
+      marketRequestPending = false
+    }
   })
   ipcMain.handle(DESKTOP_IPC.updatesCheck, async (event) => {
     assertDesktopSender(event, ['shell'])

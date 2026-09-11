@@ -34,6 +34,10 @@ export const en = {
   refreshing: 'Refreshing…',
   refreshed: 'Plugin list refreshed.',
   loadingPlugins: 'Reading Desktop plugins…',
+  marketConfirmTitle: 'Confirm Plugin Changes',
+  marketInstall: 'Install these plugins and restart the Desktop backend?',
+  marketRemove: 'Remove this plugin and restart the Desktop backend?',
+  cancel: 'Cancel',
 } as const
 
 /** Every Desktop locale supplies the complete English key set. */
@@ -73,6 +77,10 @@ export const zh = {
   refreshing: '正在刷新…',
   refreshed: '插件列表已刷新。',
   loadingPlugins: '正在读取桌面插件…',
+  marketConfirmTitle: '确认插件变更',
+  marketInstall: '安装以下插件并重启桌面后端？',
+  marketRemove: '移除此插件并重启桌面后端？',
+  cancel: '取消',
 } as const satisfies DesktopMessages
 
 /** Locale payload exposed to the Desktop-owned renderer. */

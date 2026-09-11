@@ -2,6 +2,7 @@
 
 import type { DesktopPluginRecord } from './project-manager.ts'
 import type { DesktopLocale } from './locale.ts'
+import type { DesktopMarketRequest } from './market-request.ts'
 
 /** IPC channel names kept private to the desktop application bundle. */
 export const DESKTOP_IPC = {
@@ -10,10 +11,19 @@ export const DESKTOP_IPC = {
   pluginsAdd: 'dsh-desktop:plugins-add',
   pluginsRemove: 'dsh-desktop:plugins-remove',
   pluginsUpdate: 'dsh-desktop:plugins-update',
+  marketList: 'dsh-desktop:market-list',
+  marketRequest: 'dsh-desktop:market-request',
   updatesCheck: 'dsh-desktop:updates-check',
   updatesInstall: 'dsh-desktop:updates-install',
   updatesState: 'dsh-desktop:updates-state',
 } as const
+
+/** Application plugins may propose changes; only native confirmation authorizes them. */
+export interface DshDesktopMarketApi {
+  readonly protocolVersion: 1
+  list(): Promise<readonly DesktopPluginRecord[]>
+  request(request: DesktopMarketRequest): Promise<{ readonly applied: boolean }>
+}
 
 /** Desktop release update state rendered by desktop-owned UI. */
 export interface DesktopUpdateState {

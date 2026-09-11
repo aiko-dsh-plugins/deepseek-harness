@@ -22,6 +22,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { valid as validVersion } from 'semver'
 import {
   DESKTOP_PACKAGES_DIR,
   DESKTOP_PACKAGE_SET_FILE,
@@ -48,6 +49,7 @@ const DESKTOP_PROJECT_FILES = [
 export interface DesktopPluginRecord {
   readonly name: string
   readonly version: string
+  readonly spec?: string
 }
 
 /** Installed desktop project manifest slice. */
@@ -90,6 +92,7 @@ export interface DesktopProjectHooks {
 /** Supported dependency mutation. */
 export type DesktopProjectMutation =
   | { readonly type: 'plugin-add'; readonly spec: string }
+  | { readonly type: 'plugins-add'; readonly specs: readonly string[] }
   | { readonly type: 'plugin-remove'; readonly name: string }
   | { readonly type: 'plugin-update'; readonly name: string; readonly version: string }
 
@@ -155,11 +158,24 @@ function assertVersion(version: string): void {
 }
 
 /**
- * Validate one registry package spec and return its requested package name when explicit.
- * @param spec - npm registry name with an optional version or tag.
+ * Validate a registry package or an explicitly named HTTPS tarball.
+ * @param spec - npm name with an optional version, tag, or HTTPS tarball URL.
  * @returns package name, or undefined when the spec's final name is registry-resolved.
  */
 export function packageNameFromSpec(spec: string): string | undefined {
+  const sourceAt = spec.indexOf('@https://', 1)
+  if (sourceAt !== -1) {
+    const name = spec.slice(0, sourceAt)
+    assertPackageName(name)
+    const source = spec.slice(sourceAt + 1)
+    const url = new URL(source)
+    if (url.protocol !== 'https:' || url.username !== '' || url.password !== ''
+      || url.search !== '' || url.hash !== '' || !url.pathname.endsWith('.tgz')
+      || /[\s\\]/u.test(source)) {
+      throw new Error('desktop project: expected an HTTPS tarball URL without credentials, query, or fragment')
+    }
+    return name
+  }
   if (spec === '' || spec.startsWith('-') || /[\s\\]/u.test(spec) || spec.includes('://') || spec.startsWith('file:')) {
     throw new Error(`desktop project: unsupported npm package spec ${JSON.stringify(spec)}`)
   }
@@ -285,7 +301,12 @@ function profilePluginNames(projectDir: string): readonly string[] {
 }
 
 function pluginRecords(projectDir: string): readonly DesktopPluginRecord[] {
-  return profilePluginNames(projectDir).map(name => inspectPlugin(projectDir, name))
+  const manifest = projectManifest(projectDir)
+  return profilePluginNames(projectDir).map((name) => {
+    const installed = inspectPlugin(projectDir, name)
+    const source = manifest.dependencies[name]
+    return source?.startsWith('https:') === true ? { ...installed, spec: `${name}@${source}` } : installed
+  })
 }
 
 function writeProfilePlugins(projectDir: string, plugins: readonly DesktopPluginRecord[]): void {
@@ -413,15 +434,19 @@ export class DesktopProjectManager {
           const plugins = pluginRecords(this.paths.profile)
           copyMetadata(seedDir, stagingProfile)
           await this.runPnpm(stagingProfile, ['install', '--offline', '--frozen-lockfile', '--trust-lockfile'])
+          const removedDefaults = profilePluginNames(stagingProfile).filter(name => !plugins.some(plugin => plugin.name === name))
+          if (removedDefaults.length > 0) {
+            await this.runPnpm(stagingProfile, ['remove', ...removedDefaults, '--config.offline=true'])
+          }
           if (plugins.length > 0) {
             await this.runPnpm(stagingProfile, [
               'add',
-              ...plugins.map(plugin => `${plugin.name}@${plugin.version}`),
+              ...plugins.map(plugin => plugin.spec ?? `${plugin.name}@${plugin.version}`),
               '--save-exact',
               '--offline',
             ])
-            writeProfilePlugins(stagingProfile, plugins)
           }
+          writeProfilePlugins(stagingProfile, plugins)
         } else {
           copyMetadata(seedDir, stagingProfile)
           await this.runPnpm(stagingProfile, ['install', '--offline', '--frozen-lockfile', '--trust-lockfile'])
@@ -462,31 +487,58 @@ export class DesktopProjectManager {
   }
 
   private async applyMutation(projectDir: string, mutation: DesktopProjectMutation): Promise<void> {
+    const packageSet = readDesktopCorePackageSet(projectDir, releaseFile(projectDir).version)
+    const protectedNames = new Set([DSH_PACKAGE, ...packageSet.packages.map(entry => entry.name)])
+    const assertPlugin = (name: string): void => {
+      if (protectedNames.has(name) || DESKTOP_PROFILE_BUNDLES.some(bundle => bundle === name)) {
+        throw new Error(`desktop project: ${name} is managed by the desktop release`)
+      }
+    }
     switch (mutation.type) {
-      case 'plugin-add': {
-        const requestedName = packageNameFromSpec(mutation.spec)
-        if (requestedName === undefined) throw new Error('desktop project: plugin package name is required')
-        await this.runPnpm(projectDir, ['add', mutation.spec, '--save-exact'])
-        const installed = inspectPlugin(projectDir, requestedName)
-        const current = pluginRecords(projectDir).filter(plugin => plugin.name !== installed.name)
-        writeProfilePlugins(
-          projectDir,
-          [...current, installed].sort((left, right) => left.name.localeCompare(right.name)),
-        )
+      case 'plugin-add':
+      case 'plugins-add': {
+        const specs = mutation.type === 'plugin-add' ? [mutation.spec] : mutation.specs
+        if (specs.length === 0) throw new Error('desktop project: plugin packages are required')
+        const names = specs.map((spec) => {
+          const name = packageNameFromSpec(spec)
+          if (name === undefined) throw new Error('desktop project: plugin package name is required')
+          assertPlugin(name)
+          return name
+        })
+        if (new Set(names).size !== names.length) throw new Error('desktop project: duplicate plugin packages')
+        const previous = pluginRecords(this.paths.profile)
+        await this.runPnpm(projectDir, ['add', ...specs, '--save-exact'])
+        const installed = names.map(name => inspectPlugin(projectDir, name))
+        const current = previous.filter(plugin => !names.includes(plugin.name))
+        const firstReplaced = previous.findIndex(plugin => names.includes(plugin.name))
+        const insertAt = firstReplaced === -1 ? current.length : firstReplaced
+        current.splice(insertAt, 0, ...installed)
+        writeProfilePlugins(projectDir, current)
         return
       }
       case 'plugin-remove': {
         assertPackageName(mutation.name)
+        assertPlugin(mutation.name)
         if (!profilePluginNames(projectDir).includes(mutation.name)) {
           throw new Error(`desktop project: plugin ${JSON.stringify(mutation.name)} is not installed`)
         }
-        const remaining = pluginRecords(projectDir).filter(plugin => plugin.name !== mutation.name)
+        const remaining = pluginRecords(this.paths.profile).filter(plugin => plugin.name !== mutation.name)
+        for (const plugin of remaining) {
+          const manifest = readJson(join(this.paths.profile, 'node_modules', ...plugin.name.split('/'), 'package.json'))
+          if (!isRecord(manifest)) throw new Error(`desktop project: invalid plugin manifest ${plugin.name}`)
+          for (const dependencies of [manifest.dependencies, manifest.peerDependencies]) {
+            if (isRecord(dependencies) && Object.hasOwn(dependencies, mutation.name)) {
+              throw new Error(`desktop project: ${mutation.name} is required by ${plugin.name}`)
+            }
+          }
+        }
         await this.runPnpm(projectDir, ['remove', mutation.name])
         writeProfilePlugins(projectDir, remaining)
         return
       }
       case 'plugin-update':
         assertPackageName(mutation.name)
+        assertPlugin(mutation.name)
         assertVersion(mutation.version)
         if (!profilePluginNames(projectDir).includes(mutation.name)) {
           throw new Error(`desktop project: plugin ${JSON.stringify(mutation.name)} is not installed`)
@@ -682,16 +734,36 @@ export class DesktopProjectManager {
   }
 }
 
-/** Create seed metadata for one exact Electron and dsh release. */
-export function createSeedMetadata(seedDir: string, release: DesktopRelease): void {
+/**
+ * Create release seed metadata with removable plugins for first installation only.
+ * @param seedDir - Seed directory containing the verified core package set.
+ * @param release - Exact Electron and dsh release identity.
+ * @param preinstalledPlugins - Parsed JSON mapping plugin names to exact npm versions or HTTPS tarballs; core overrides are rejected.
+ */
+export function createSeedMetadata(seedDir: string, release: DesktopRelease, preinstalledPlugins: unknown = {}): void {
   mkdirSync(seedDir, { recursive: true, mode: 0o700 })
   const packageSet = verifyDesktopCorePackageSet(seedDir, release.version)
+  const corePackages = desktopCorePackageOverrides(packageSet)
+  if (!isRecord(preinstalledPlugins) || Array.isArray(preinstalledPlugins)) {
+    throw new Error('desktop seed: preinstalled plugins must be a package source map')
+  }
+  const plugins = Object.entries(preinstalledPlugins).map(([name, source]): [string, string] => {
+    assertPackageName(name)
+    if (Object.hasOwn(corePackages, name) || DESKTOP_PROFILE_BUNDLES.some(bundle => bundle === name)) {
+      throw new Error(`desktop seed: preinstalled plugin ${name} is managed by the desktop release`)
+    }
+    if (typeof source !== 'string' || packageNameFromSpec(`${name}@${source}`) !== name
+      || (!source.startsWith('https://') && validVersion(source) === null)) {
+      throw new Error(`desktop seed: preinstalled plugin ${name} requires an exact version or HTTPS tarball`)
+    }
+    return [name, source]
+  })
   const manifest: DesktopProjectManifest = {
     name: PROJECT_NAME,
     private: true,
     version: '0.0.0',
-    dependencies: desktopCorePackageOverrides(packageSet),
-    dsh: { profile: { bundles: [...DESKTOP_PROFILE_BUNDLES] } },
+    dependencies: { ...corePackages, ...Object.fromEntries(plugins) },
+    dsh: { profile: { bundles: [...DESKTOP_PROFILE_BUNDLES, ...plugins.map(([name]) => name)] } },
   }
   writeJson(join(seedDir, 'package.json'), manifest)
   writeFileSync(
