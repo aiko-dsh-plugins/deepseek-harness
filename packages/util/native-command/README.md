@@ -39,6 +39,8 @@ const { stdout, stderr } = await runNativeCommand('osascript', ['-e', script], s
 
 On exit 0 the call resolves with captured stdout and stderr. On any failure it rejects with the exit `code` and both captured streams attached, so a caller can tell a missing tool (`ENOENT`), a cancellation (`ABORT_ERR`), and a real command failure apart without re-running the command.
 
+The runner hides Windows helper windows by default. Pass `{ windowsHide: false }` as the fourth argument when the executable's own window is the requested UI. `revealNativePath` uses this option for Explorer; hiding that process can also hide its file-manager window.
+
 ### Injecting the command boundary
 
 The `NativeCommandRunner` type is the injectable command boundary for host integrations: pass the function (or a wrapper) where the integration needs a testable seam, so tests can substitute a fake runner.

@@ -10,21 +10,23 @@ export type NativeCommandRunner = (
   command: string,
   args: readonly string[],
   signal: AbortSignal,
+  options?: { windowsHide: boolean },
 ) => Promise<{ stdout: string; stderr: string }>
 
 /**
- * Run a host command with utf8 stdio, abort propagation, and Windows hide.
+ * Run a host command with utf8 stdio, abort propagation, and hidden Windows helpers by default.
  * @param command - executable path or PATH name.
  * @param args - argv (never a shell string).
  * @param signal - caller/connection lifetime; abort terminates the child.
+ * @param options - Set windowsHide to false for commands whose own window is the requested UI.
  * @returns captured stdout/stderr on exit 0.
  */
-export const runNativeCommand: NativeCommandRunner = (command, args, signal) =>
+export const runNativeCommand: NativeCommandRunner = (command, args, signal, options = { windowsHide: true }) =>
   new Promise((resolve, reject) => {
     execFile(
       command,
       [...args],
-      { encoding: 'utf8', signal, windowsHide: true },
+      { encoding: 'utf8', signal, windowsHide: options.windowsHide },
       (error, stdout, stderr) => {
         if (error !== null) {
           const failure = Object.assign(new Error(error.message, { cause: error }), {
