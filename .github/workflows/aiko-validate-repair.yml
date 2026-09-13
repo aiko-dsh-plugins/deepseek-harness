@@ -34,7 +34,7 @@ jobs:
           mkdir -p inputs patch runner output
           gh release download desktop-mac-test-2026-09-13-npm-content --repo aiko-dsh-plugins/deepseek-harness --pattern dsh-aiko-test-0.1.5-alpha.2-npm-content-arm64.zip --dir inputs
           cp source/release-tools/desktop-repair-patch.zip inputs/
-          echo '8c7ea9ca7a3ff2bd7d79d58edac6afa9249e560c40b31e94859fcc2f2f63b40a  inputs/desktop-repair-patch.zip' | shasum -a 256 -c -
+          echo '00d09a8fcda47bbb0861d43986e86895caa8274e4c8e78f13561b298a8a18548  inputs/desktop-repair-patch.zip' | shasum -a 256 -c -
           ditto -x -k inputs/desktop-repair-patch.zip patch
       - name: Install packaging and smoke dependencies
         run: |
