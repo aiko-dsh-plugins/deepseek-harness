@@ -1,0 +1,49 @@
+name: Validate compiled Apple Silicon repair
+
+on:
+  push:
+    branches: [codex/macos-npm-plugin-repair]
+    paths: [.github/workflows/aiko-validate-repair.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aiko-compiled-mac-repair
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'aiko-dsh-plugins/deepseek-harness'
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Fetch digest-pinned compiled inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p inputs patch runner output
+          gh release download desktop-mac-test-2026-09-13-npm-content --repo aiko-dsh-plugins/deepseek-harness --pattern dsh-aiko-test-0.1.5-alpha.2-npm-content-arm64.zip --dir inputs
+          gh release download desktop-mac-test-2026-09-13-npm-repair --repo aiko-dsh-plugins/deepseek-harness --pattern desktop-repair-patch.zip --dir inputs
+          echo '8c7ea9ca7a3ff2bd7d79d58edac6afa9249e560c40b31e94859fcc2f2f63b40a  inputs/desktop-repair-patch.zip' | shasum -a 256 -c -
+          ditto -x -k inputs/desktop-repair-patch.zip patch
+      - name: Install packaging and smoke dependencies
+        run: |
+          npm install --prefix runner --ignore-scripts --no-audit --no-fund @electron/asar@4.3.0 playwright@1.62.1
+          ln -s "$PWD/runner/node_modules" patch/node_modules
+      - name: Repack and validate the native application
+        run: node patch/repack.mjs inputs/dsh-aiko-test-0.1.5-alpha.2-npm-content-arm64.zip patch output
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aiko-npm-repair-arm64
+          if-no-files-found: warn
+          path: |
+            output/*.zip
+            output/*.json
+            output/*.png
+            output/*.log
+            output/SHA256SUMS
