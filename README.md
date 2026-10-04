@@ -2,6 +2,12 @@
 
 English | [中文](README.zh.md)
 
+## Aiko public fork
+
+This repository is Aiko's public fork of [DeepSeek's official Harness](https://github.com/deepseek-ai/deepseek-harness). It retains public release artifacts and historical source; active Aiko/云遥 Host and desktop development belongs to the private [source repository](https://github.com/aiko-dsh-plugins/deepseek-harness-source). The source, Workbench business plugins, and platform are separate projects, documented in the [repository map](https://github.com/aiko-dsh-plugins/aiko-dsh-workbench/blob/main/docs/repository-map.md).
+
+Select a release by its tested source commit, Host version, and product profile. The npm command below installs the official package; this fork's default branch does not imply that all current Aiko product changes or desktop builds are included. Aiko maintains its fork changes and release validation independently from DeepSeek.
+
 DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
 
 It is built on an **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512).
